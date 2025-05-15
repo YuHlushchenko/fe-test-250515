@@ -1,67 +1,79 @@
+import { enqueueSnackbar } from "notistack";
 import { useCallback, useEffect, useState } from "react";
 
 export function useLocalStorage<T>(
   key: string,
-  initialValue: T,
-  options?: {
-    validate?: (value: unknown) => value is T;
-    onError?: (error: unknown) => void;
-  }
-): [T, (value: T) => void, () => void] {
-  const safeParse = (raw: string | null): T => {
+  initialValue: T[]
+): [T[], (value: T[]) => void, () => void] {
+  // Read from localStorage only on first mount
+  const readValue = useCallback((): T[] => {
+    if (typeof window === "undefined") {
+      return initialValue;
+    }
+
     try {
-      if (!raw) return initialValue;
-
-      const parsed = JSON.parse(raw);
-
-      // Check if the parsed value matches the expected type
-      if (options?.validate && !options.validate(parsed)) {
-        throw new Error(`Invalid data format`);
-      }
-
-      return parsed;
+      const item = localStorage.getItem(key);
+      return item ? JSON.parse(item) : initialValue;
     } catch (error) {
-      options?.onError?.(error);
+      console.warn(`Failed to read localStorage key “${key}”:`, error);
+      enqueueSnackbar("Failed to read localStorage key", {
+        variant: "warning",
+        autoHideDuration: 2000,
+      });
 
       return initialValue;
     }
-  };
+  }, [key, initialValue]);
 
-  const [storedValue, setStoredValue] = useState<T>(() =>
-    safeParse(localStorage.getItem(key))
-  );
+  const [storedValue, setStoredValueState] = useState<T[]>(readValue);
 
   const setValue = useCallback(
-    (value: T) => {
+    (value: T[]) => {
       try {
         localStorage.setItem(key, JSON.stringify(value));
-        setStoredValue(value);
+        setStoredValueState(value);
+
+        // Dispatch custom event to notify all listeners inside the same tab
+        window.dispatchEvent(new Event("local-storage-change"));
       } catch (error) {
-        options?.onError?.(error);
+        console.warn(`Failed to set localStorage key “${key}”:`, error);
+        enqueueSnackbar("Failed to set localStorage key", {
+          variant: "warning",
+          autoHideDuration: 2000,
+        });
       }
     },
-    [key, options]
+    [key]
   );
 
   const removeValue = useCallback(() => {
     try {
       localStorage.removeItem(key);
-
-      setStoredValue(initialValue);
+      setStoredValueState(initialValue);
+      window.dispatchEvent(new Event("local-storage-change"));
     } catch (error) {
-      options?.onError?.(error);
+      console.warn(`Failed to remove localStorage key “${key}”:`, error);
+      enqueueSnackbar("Failed to remove localStorage key", {
+        variant: "warning",
+        autoHideDuration: 2000,
+      });
     }
-  }, [key, initialValue, options]);
+  }, [key, initialValue]);
 
   useEffect(() => {
-    const handleStorage = (e: StorageEvent) => {
-      if (e.key === key) setStoredValue(safeParse(e.newValue));
+    const handleStorageChange = () => {
+      setStoredValueState(readValue());
     };
 
-    window.addEventListener("storage", handleStorage);
+    // Listen to both native 'storage' (cross-tab) and custom 'local-storage-change' (same tab)
+    window.addEventListener("storage", handleStorageChange);
+    window.addEventListener("local-storage-change", handleStorageChange);
 
-    return () => window.removeEventListener("storage", handleStorage);
-  }, [key]);
+    return () => {
+      window.removeEventListener("storage", handleStorageChange);
+      window.removeEventListener("local-storage-change", handleStorageChange);
+    };
+  }, [readValue]);
 
   return [storedValue, setValue, removeValue];
 }
